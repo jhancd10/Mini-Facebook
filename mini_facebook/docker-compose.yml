@@ -1,0 +1,260 @@
+version: "3"
+services:
+  rabbitmq:
+    hostname: rabbit
+    container_name: rabbitMQService
+    image: rabbitmq:management
+    environment:
+      - RABBITMQ_DEFAULT_USER=rabbitmq
+      - RABBITMQ_DEFAULT_PASS=rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: "rabbitmq-diagnostics -q ping"
+      interval: 10s
+      timeout: 15s
+      retries: 5
+  neo4jdb:
+    image: neo4j
+    container_name: MyNeo4JServiceDB
+    ports: 
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+        NEO4J_PASSWORD: password
+    networks:
+      - default
+    # healthcheck:
+    #   test: "${DOCKER_HEALTHCHECK_TEST:-curl http://localhost:7474/}"
+    #   interval: 10s
+    #   timeout: 20s
+    #   retries: 5
+  mysqldb:
+    image: mysql:5.7
+    container_name: MySQLServiceDB
+    ports:
+        - "3306:3306"
+    environment:
+        MYSQL_USER: dev
+        MYSQL_PASSWORD: 123456
+        MYSQL_ROOT_PASSWORD: test 
+    volumes:
+      - ./databases/dump:/docker-entrypoint-initdb.d
+      - persistent:/var/lib/mysql
+    networks:
+        - default
+    healthcheck:
+        test: "/usr/bin/mysql --user=$$MYSQL_USER --password=$$MYSQL_PASSWORD --execute \"SHOW DATABASES;\""
+        interval: 2s
+        timeout: 20s
+        retries: 10
+  mongodb:
+    image: mongo
+    container_name: mongoservicedb  # The name is different because the pymongo has problems with with case-sensitive names
+    ports:
+      - 27017:27017
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+      MONGO_INITDB_DATABASE: publicationsDB
+    healthcheck:
+      test: "mongo --eval 'db.stats().ok'"
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      - default
+  haproxyServiceUsersAPI:
+    image: haproxy:2.0
+    container_name: LoadBalancerServiceUsersAPI
+    restart: on-failure
+    depends_on:
+      - usersapi1
+      - usersapi2
+    links:
+      - usersapi1
+      - usersapi2
+    ports:
+      - "8181:80"
+      - "7171:70"
+    volumes:
+      - ./haproxy_users_service_api:/haproxy-override
+      - ./haproxy_users_service_api/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - default
+  usersapi1:
+    build: ./python_users_service_api
+    image: python_users_service_api
+    container_name: pythonServiceUsersAPI1
+    command: python3 main.py
+    restart: on-failure
+    depends_on:
+      - mysqldb
+      - memcachedServer1
+      - memcachedServer2
+    links:
+      - mysqldb
+      - memcachedServer1
+      - memcachedServer2
+    ports:
+      - 5010:5010
+    networks:
+        - default
+    healthcheck:
+      test: "${DOCKER_HEALTHCHECK_TEST:-curl localhost:5010/ping}"
+      interval: 2s
+      timeout: 20s
+      retries: 10
+  usersapi2:
+    build: ./python_users_service_api
+    image: python_users_service_api
+    container_name: pythonServiceUsersAPI2
+    command: python3 main.py
+    restart: on-failure
+    depends_on:
+      - mysqldb
+      - memcachedServer1
+      - memcachedServer2
+    links:
+      - mysqldb
+      - memcachedServer1
+      - memcachedServer2
+    ports:
+      - 5011:5010
+    networks:
+        - default
+    healthcheck:
+      test: "${DOCKER_HEALTHCHECK_TEST:-curl localhost:5010/ping}"
+      interval: 2s
+      timeout: 20s
+      retries: 10
+  haproxyServicePublicationsAPI:
+    image: haproxy:2.0
+    container_name: LoadBalancerServicePublicationsAPI
+    restart: on-failure
+    depends_on:
+      - publicationsapi1
+      - publicationsapi2
+    links:
+      - publicationsapi1
+      - publicationsapi2
+    ports:
+      - "8282:80"
+      - "7272:70"
+    volumes:
+      - ./haproxy_publications_service_api:/haproxy-override
+      - ./haproxy_publications_service_api/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - default
+  publicationsapi1:
+    build: ./python_publications_service_api
+    image: python_publications_service_api
+    container_name: pythonServicePublicationsAPI1
+    command: python3 main.py
+    restart: on-failure
+    depends_on:
+      - mysqldb
+      - rabbitmq
+    links:
+      - mysqldb
+      - rabbitmq
+    ports:
+      - 5016:5015
+    networks:
+        - default
+    healthcheck:
+      test: "${DOCKER_HEALTHCHECK_TEST:-curl localhost:5011/ping}"
+      interval: 2s
+      timeout: 20s
+      retries: 10
+  publicationsapi2:
+    build: ./python_publications_service_api
+    image: python_publications_service_api
+    container_name: pythonServicePublicationsAPI2
+    command: python3 main.py
+    restart: on-failure
+    depends_on:
+      - mysqldb
+      - rabbitmq
+    links:
+      - mysqldb
+      - rabbitmq
+    ports:
+      - 5017:5015
+    networks:
+        - default
+    healthcheck:
+      test: "${DOCKER_HEALTHCHECK_TEST:-curl localhost:5011/ping}"
+      interval: 2s
+      timeout: 20s
+      retries: 10
+  user_relationships_creator_daemon:
+    build: ./python_user_relationships_creator_daemon
+    image: python_user_relationships_creator_daemon
+    container_name: pythonUserRelationshipsCreatorDaemon 
+    restart: on-failure
+    depends_on:
+      - mysqldb
+      - neo4jdb
+    links:
+      - mysqldb
+      - neo4jdb
+    networks:
+      - default
+  publications_consumer_service:
+    build: ./python_publications_consumer
+    image: python_publications_service
+    container_name: pythonPublicationsService
+    restart: on-failure
+    depends_on:
+      - rabbitmq
+      - mongodb
+    links:
+      - rabbitmq
+      - mongodb
+    networks:
+      - default
+  haproxyAPIGateway:
+    image: haproxy:2.0
+    container_name: LoadBalancerAPIGateway
+    restart: on-failure
+    depends_on:
+      - haproxyServicePublicationsAPI
+      - haproxyServiceUsersAPI
+    links:
+      - haproxyServicePublicationsAPI
+      - haproxyServiceUsersAPI
+    ports:
+      - "8383:80"
+      - "7373:70"
+    volumes:
+      - ./haproxy_api_gateway:/haproxy-override
+      - ./haproxy_api_gateway/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - default
+  memcachedServer1:
+    image: memcached
+    container_name: MemcachedServer1
+    ports:
+      - "11211:11211"
+    networks:
+      - default
+  memcachedServer2:
+    image: memcached
+    container_name: MemcachedServer2
+    ports:
+      - "11212:11211"
+    networks:
+      - default
+  nagios:
+    build: ./nagios
+    image: nagios_monitoring
+    container_name: NagiosMonitoring
+    ports:
+      - "9090:80"
+    networks:
+      - default
+volumes:
+    persistent:
+
